@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+backend/package/
+.env
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# CDK
+cdk.out/
+infra/cdk.out/
+infra/cdk-outputs.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.zip
+
+# Local env overrides (contains real credentials)
+frontend/.env.local
+scripts/.env

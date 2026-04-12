@@ -1,0 +1,22 @@
+{
+  "name": "content-moderation-infra",
+  "version": "1.0.0",
+  "description": "AWS CDK infrastructure for content moderation system",
+  "scripts": {
+    "build": "tsc",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "~5.4.0",
+    "aws-cdk": "^2.170.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.0",
+    "source-map-support": "^0.5.21"
+  }
+}
