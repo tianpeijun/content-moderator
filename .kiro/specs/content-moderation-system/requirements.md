@@ -192,3 +192,41 @@
 3. THE Admin_Console SHALL 在数据统计页面展示语言分布图表，统计各语言（如 en、zh、fr 等）的审核数量
 4. WHEN 管理员选择日期范围时，THE Admin_Console SHALL 按所选日期范围过滤所有分布图表的数据
 5. WHEN 每次审核完成时，THE Moderation_API SHALL 检测评论内容的语言并将语言代码存储到审核日志的 language 字段中
+
+### 需求 16：智能模型路由
+
+**用户故事：** 作为后端开发，我希望系统能根据审核内容类型（纯文本 vs 图文混合）自动选择最优模型，以便在保证图文审核质量的同时提升纯文本审核的响应速度。
+
+#### 验收标准
+
+1. WHEN 审核请求仅包含文本（无 image_url 或 image_url 为空）时，THE Moderation_API SHALL 使用纯文本专用模型（`routing_type=text_only`，如 Qwen3 32B）进行审核，以获得更快的响应速度
+2. WHEN 审核请求包含图片（image_url 非空）时，THE Moderation_API SHALL 使用图文混合模型（`routing_type=multimodal` 或 `any`，如 Claude Sonnet 4）进行审核，以保证图文联合审核的质量
+3. THE Admin_Console SHALL 在模型配置页面支持分别配置"纯文本模型"和"图文混合模型"，包括各自的备用模型和降级策略
+4. WHEN 模型路由配置变更时，THE Moderation_API SHALL 在后续审核请求中立即使用更新后的路由配置
+
+### 需求 17：预审规则快速过滤
+
+**用户故事：** 作为后端开发，我希望系统能通过关键词/正则规则快速过滤明确的违规内容，以便在不调用 AI 模型的情况下实现毫秒级响应。
+
+#### 验收标准
+
+1. WHEN 审核请求的文本内容命中预审规则（关键词或正则表达式）时，THE Moderation_API SHALL 直接返回审核结果，不调用 AI 模型，响应时间应在 100ms 以内
+2. WHEN 审核请求的文本内容未命中任何预审规则时，THE Moderation_API SHALL 正常调用 AI 模型进行审核
+3. THE Admin_Console SHALL 支持在管理后台配置预审规则（关键词列表和正则表达式），包括对应的标签和处置动作
+4. WHEN 预审规则命中时，THE Moderation_API SHALL 在审核日志中标记为预审命中（pre_filter=true），以便区分 AI 审核和预审过滤的结果
+5. THE 预审规则 SHALL 至少覆盖 7 种违规类别：privacy_leak（手机号/邮箱/身份证/社交ID）、spam（URL/推广关键词）、toxic（中英文辱骂）、hate_speech（仇恨言论）、misleading（虚假医疗宣传）、illegal_trade（违法交易）、政治敏感
+
+### 需求 18：低延迟 API 网关与性能 SLA
+
+**用户故事：** 作为业务系统集成方，我希望纯文本审核在大多数场景下能在 500ms 内返回结果，以便支持评论发布场景的实时审核体验。
+
+#### 验收标准
+
+1. THE Moderation_API SHALL 通过 Amazon API Gateway HTTP API v2（非 REST API）对外提供服务，以降低网关层延迟开销
+2. WHEN 纯文本审核请求命中预审规则时，THE Moderation_API SHALL 在 **P95 ≤ 500ms**、**P50 ≤ 400ms** 内返回结果（客户端复用 HTTPS 连接、同区域部署、Lambda 已热启动的前提下）
+3. WHEN 纯文本审核请求走模型路径（Qwen3 32B）时，THE Moderation_API SHALL 在 **P95 ≤ 1500ms**、**P50 ≤ 1000ms** 内返回结果
+4. THE Moderation_API SHALL 在典型混合流量（预审命中率 ≥ 60%）下，整体 P50 响应时间 ≤ 500ms
+5. THE API 网关 SHALL 支持通过 Lambda Authorizer 进行 API Key 校验（X-API-Key 请求头），并对认证结果做 5 分钟缓存以降低认证开销
+6. THE 客户端集成文档 SHALL 提供 Python / Node.js / Java / Go 四种语言的 HTTP 连接复用最佳实践代码
+7. WHEN 发生 Lambda 冷启动时，THE Moderation_API 允许该请求延迟超出上述 SLA，但 SHALL 在生产环境通过 Provisioned Concurrency 或类似机制控制冷启动比例
+

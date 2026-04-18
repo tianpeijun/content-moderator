@@ -24,6 +24,7 @@ class ModelConfig(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=1024)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    routing_type: Mapped[str] = mapped_column(String(20), nullable=False, default="any")  # text_only / multimodal / any
     fallback_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cost_per_1k_input: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     cost_per_1k_output: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

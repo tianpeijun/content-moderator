@@ -60,7 +60,7 @@ def _load_rules_by_ids(db: Session, rule_ids: list[uuid.UUID]) -> list[Rule]:
 def _build_model_settings(db: Session) -> ModelSettings:
     """Load primary and fallback model config from DB."""
     primary = db.execute(
-        select(ModelConfig).where(ModelConfig.is_primary.is_(True))
+        select(ModelConfig).where(ModelConfig.is_primary.is_(True)).limit(1)
     ).scalar_one_or_none()
 
     if primary is None:
@@ -70,7 +70,7 @@ def _build_model_settings(db: Session) -> ModelSettings:
         )
 
     fallback = db.execute(
-        select(ModelConfig).where(ModelConfig.is_fallback.is_(True))
+        select(ModelConfig).where(ModelConfig.is_fallback.is_(True)).limit(1)
     ).scalar_one_or_none()
 
     return ModelSettings(

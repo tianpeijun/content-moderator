@@ -228,7 +228,7 @@
 
   - [x] 10.3 定义计算层资源
     - Lambda 函数：审核 API、管理后台 API、批量测试 Worker
-    - API Gateway：路由配置、API Key 认证、Cognito Authorizer
+    - HTTP API Gateway v2：路由配置、Lambda Authorizer（X-API-Key 校验 + 5 min 缓存）、JWT Authorizer（Cognito）
     - SQS → Lambda 事件源映射
     - _需求: 10.1, 10.2_
 
@@ -250,7 +250,7 @@
     - _需求: 9.1_
 
   - [x] 11.2 端到端联调
-    - 连接所有组件：API Gateway → Lambda → RDS / Bedrock / SQS
+    - 连接所有组件：HTTP API Gateway v2 → Lambda → RDS / Bedrock / SQS
     - 验证审核 API 完整流程
     - 验证管理后台完整流程
     - _需求: 1.1, 3.4, 9.1_
@@ -362,6 +362,61 @@
     - StatsPage.vue 新增语言分布图表（饼图或柱状图）
     - 所有新增图表接入页面顶部的日期范围选择器
     - _需求: 15.1, 15.2, 15.3, 15.4_
+
+- [x] 16. 智能模型路由
+  - [x] 16.1 model_config 表增加 routing_type 字段
+    - 为 model_config 表添加 routing_type 列（VARCHAR 20：text_only / multimodal / any）
+    - 更新 ModelConfig SQLAlchemy 模型和 Pydantic Schema
+    - 更新模型配置种子数据：Haiku 4.5 设为 text_only，Sonnet 4 设为 multimodal
+    - _需求: 16.3_
+
+  - [x] 16.2 审核 API 实现智能路由
+    - 修改 _build_model_settings 函数，根据请求是否包含图片选择不同模型
+    - 纯文本请求：优先使用 routing_type=text_only 的主模型
+    - 图文混合请求：优先使用 routing_type=multimodal 的主模型
+    - 如果对应类型没有配置主模型，回退到 routing_type=any 或任意主模型
+    - _需求: 16.1, 16.2, 16.4_
+
+  - [x] 16.3 前端模型配置页面增加路由类型
+    - ModelConfigPage.vue 表格增加 routing_type 列
+    - 编辑弹窗增加 routing_type 下拉选择（纯文本专用 / 图文混合专用 / 通用）
+    - _需求: 16.3_
+
+- [x] 17. 预审规则快速过滤
+  - [x] 17.1 实现 PreFilterEngine
+    - 创建 `backend/app/services/pre_filter.py`，定义 PreFilterRule / PreFilterResult dataclass
+    - 编译 DEFAULT_RULES：至少 7 类违规（privacy_leak / spam / toxic / hate_speech / misleading / illegal_trade / 政治敏感）
+    - 支持中文正则（手机号 / 身份证 / 邮箱 / 微信QQ / 国际电话 / 日韩电话）
+    - 支持中英文辱骂词库 + 仇恨词库 + 虚假医疗宣传
+    - _需求: 17.1, 17.5_
+
+  - [x] 17.2 集成到审核 API
+    - 在 moderate_content 函数开头调用 _pre_filter.scan(text)
+    - 若命中（matched=True），跳过规则加载 / prompt 组装 / 模型调用，直接返回并写入 moderation_logs，model_id 字段标记为 "pre_filter"
+    - Lambda 内部处理时间 <50ms
+    - _需求: 17.1, 17.4_
+
+- [x] 18. 低延迟 HTTP API 网关与性能 SLA
+  - [x] 18.1 CDK 部署 HTTP API Gateway v2
+    - 在 ModerationStack 中新增 HttpApi 资源（aws-cdk-lib/aws-apigatewayv2）
+    - 配置 CORS 原生支持（allowOrigins / allowMethods / allowHeaders）
+    - 创建 Lambda Authorizer 函数校验 X-API-Key，结果缓存 5 分钟
+    - 路由 /api/v1/{proxy+} 接 moderationApi Lambda，走 Lambda Authorizer
+    - 路由 /health 无需认证
+    - _需求: 18.1, 18.5_
+
+  - [x] 18.2 编写性能测试脚本
+    - `scripts/test_rest_vs_http.py` — REST vs HTTP API A/B 对比（20 条用例）
+    - `scripts/test_http_api_mixed.py` — 混合负载测试（预审 + 模型路径）
+    - `scripts/test_prefilter_coverage.py` — 预审命中率 + 延迟
+    - `scripts/test_connection_reuse.py` — 连接复用 A/B
+    - _需求: 18.2, 18.3, 18.4_
+
+  - [x] 18.3 客户端集成指南
+    - 编写 `docs/client-integration-guide.md`
+    - 覆盖 Python (requests/httpx)、Node.js (axios+keepalive)、Java (OkHttp)、Go (http.Client) 四种语言的连接复用示例
+    - 文档中明确延迟 SLA 和达成条件
+    - _需求: 18.6_
 
 ## 备注
 

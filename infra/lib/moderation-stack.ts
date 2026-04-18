@@ -5,6 +5,9 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
+import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
+import * as apigwv2_integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import * as apigwv2_authorizers from "aws-cdk-lib/aws-apigatewayv2-authorizers";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
@@ -410,6 +413,111 @@ export class ModerationStack extends cdk.Stack {
     this.api.addGatewayResponse("Default5xx", {
       type: apigw.ResponseType.DEFAULT_5XX,
       responseHeaders: corsHeaders,
+    });
+
+    // ── HTTP API Gateway v2 (parallel, for latency comparison) ────
+    // HTTP API has lower latency (~50-100ms) and cost than REST API.
+    // API key check is done via a simple Lambda Authorizer (header match).
+    // The HTTP API accepts the same API key as the REST API for client compatibility.
+
+    // Shared API key — must match the REST API key that clients already use.
+    // Pass via CDK context: `cdk deploy -c httpApiKey=<your-key>`
+    // or via environment variable: `HTTP_API_KEY=<your-key> cdk deploy`
+    // Falls back to an environment variable at deploy time so no secret lives in source.
+    const httpApiKey =
+      this.node.tryGetContext("httpApiKey") ||
+      process.env.HTTP_API_KEY ||
+      "REPLACE_WITH_YOUR_API_KEY_AT_DEPLOY_TIME";
+
+    if (httpApiKey === "REPLACE_WITH_YOUR_API_KEY_AT_DEPLOY_TIME") {
+      // Deploy will still succeed but Lambda authorizer will reject all requests
+      // until httpApiKey context or HTTP_API_KEY env var is set.
+      cdk.Annotations.of(this).addWarning(
+        "HTTP API key not configured. Pass -c httpApiKey=<key> or set HTTP_API_KEY env var."
+      );
+    }
+
+    const authorizerFn = new lambda.Function(this, "HttpApiAuthFn", {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromInline(`
+import os
+
+EXPECTED_KEY = os.environ["API_KEY"]
+
+def handler(event, context):
+    """Simple API key check for HTTP API v2 (simple response format)."""
+    headers = event.get("headers") or {}
+    provided = headers.get("x-api-key") or headers.get("X-API-Key") or ""
+    return {"isAuthorized": provided == EXPECTED_KEY}
+`),
+      memorySize: 128,
+      timeout: cdk.Duration.seconds(3),
+      environment: { API_KEY: httpApiKey },
+    });
+
+    const httpApi = new apigwv2.HttpApi(this, "ModerationHttpApi", {
+      apiName: "ModerationServiceHttp",
+      description: "Content moderation HTTP API (lower latency alternative)",
+      corsPreflight: {
+        allowOrigins: ["*"],
+        allowMethods: [
+          apigwv2.CorsHttpMethod.GET,
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PUT,
+          apigwv2.CorsHttpMethod.DELETE,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowHeaders: [
+          "Content-Type",
+          "Authorization",
+          "X-API-Key",
+          "X-Amz-Date",
+          "X-Amz-Security-Token",
+        ],
+      },
+    });
+
+    const apiKeyAuthorizer = new apigwv2_authorizers.HttpLambdaAuthorizer(
+      "ApiKeyAuthorizer",
+      authorizerFn,
+      {
+        authorizerName: "ApiKeyAuthorizer",
+        identitySource: ["$request.header.X-API-Key"],
+        responseTypes: [apigwv2_authorizers.HttpLambdaResponseType.SIMPLE],
+        resultsCacheTtl: cdk.Duration.minutes(5),
+      }
+    );
+
+    const moderationV2Integration =
+      new apigwv2_integrations.HttpLambdaIntegration(
+        "ModerationV2Integration",
+        this.moderationApiFunction
+      );
+
+    // /api/v1/{proxy+} on HTTP API — API Key authorized
+    httpApi.addRoutes({
+      path: "/api/v1/{proxy+}",
+      methods: [
+        apigwv2.HttpMethod.GET,
+        apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PUT,
+        apigwv2.HttpMethod.DELETE,
+      ],
+      integration: moderationV2Integration,
+      authorizer: apiKeyAuthorizer,
+    });
+
+    // /health on HTTP API — no auth
+    httpApi.addRoutes({
+      path: "/health",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: moderationV2Integration,
+    });
+
+    new cdk.CfnOutput(this, "HttpApiUrl", {
+      value: httpApi.apiEndpoint,
+      description: "HTTP API v2 endpoint (lower-latency alternative)",
     });
 
     new cdk.CfnOutput(this, "ApiUrl", {

@@ -40,7 +40,7 @@ class ModerationResponse(BaseModel):
     status: str = Field(description="任务状态: pending/processing/completed/failed")
     result: str | None = Field(default=None, description="审核结果: pass/reject/review/flag")
     text_label: str | None = Field(default=None, description="文案标签: safe/spam/toxic/hate_speech/privacy_leak/political/self_harm/illegal_trade/misleading")
-    image_label: str | None = Field(default=None, description="图片标签: 无/pornography/gambling/drugs/violence/terrorism/qr_code_spam/contact_info/ad_overlay/minor_exploitation")
+    image_label: str | None = Field(default=None, description="图片标签: none/pornography/gambling/drugs/violence/terrorism/qr_code_spam/contact_info/ad_overlay/minor_exploitation")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="置信度")
     matched_rules: list[MatchedRule] = Field(default_factory=list, description="命中规则列表")
     degraded: bool = Field(default=False, description="是否降级处理")

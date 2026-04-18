@@ -56,7 +56,7 @@ class TestCaseResult:
     expected_text_label: str | None = None
     expected_image_label: str | None = None
     actual_text_label: str = "safe"
-    actual_image_label: str = "无"
+    actual_image_label: str = "none"
     confidence: float = 0.0
     matched_rules: list[dict] = field(default_factory=list)
     passed: bool = False

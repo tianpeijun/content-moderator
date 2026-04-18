@@ -14,6 +14,9 @@
         <template v-else-if="column.dataIndex === 'is_fallback'">
           <a-tag v-if="record.is_fallback" color="orange">备用</a-tag>
         </template>
+        <template v-else-if="column.dataIndex === 'routing_type'">
+          <a-tag :color="routingColor(record.routing_type)">{{ routingLabel(record.routing_type) }}</a-tag>
+        </template>
         <template v-else-if="column.dataIndex === 'cost'">
           <span>输入 ${{ record.cost_per_1k_input }} / 输出 ${{ record.cost_per_1k_output }}</span>
         </template>
@@ -55,6 +58,13 @@
         <a-form-item label="备用模型">
           <a-switch v-model:checked="form.is_fallback" />
         </a-form-item>
+        <a-form-item label="路由类型">
+          <a-select v-model:value="form.routing_type">
+            <a-select-option value="any">通用 (any)</a-select-option>
+            <a-select-option value="text_only">纯文本专用 (text_only)</a-select-option>
+            <a-select-option value="multimodal">图文混合专用 (multimodal)</a-select-option>
+          </a-select>
+        </a-form-item>
         <a-form-item label="降级默认结果">
           <a-select v-model:value="form.fallback_result" placeholder="请选择" allowClear>
             <a-select-option value="pass">通过 (pass)</a-select-option>
@@ -81,6 +91,7 @@ interface ConfigRecord {
   max_tokens: number
   is_primary: boolean
   is_fallback: boolean
+  routing_type: string
   fallback_result: string | null
   cost_per_1k_input: number
   cost_per_1k_output: number
@@ -94,6 +105,7 @@ const columns = [
   { title: 'Max Tokens', dataIndex: 'max_tokens', width: 110 },
   { title: '主模型', dataIndex: 'is_primary', width: 90 },
   { title: '备用', dataIndex: 'is_fallback', width: 80 },
+  { title: '路由类型', dataIndex: 'routing_type', width: 120 },
   { title: '参考成本 (每千token)', dataIndex: 'cost', width: 200 },
   { title: '降级结果', dataIndex: 'fallback_result', width: 100 },
   { title: '操作', dataIndex: 'actions', width: 80 },
@@ -110,8 +122,16 @@ const form = reactive({
   max_tokens: 4096,
   is_primary: false,
   is_fallback: false,
+  routing_type: 'any',
   fallback_result: null as string | null,
 })
+
+function routingLabel(t: string) {
+  return { text_only: '纯文本专用', multimodal: '图文混合专用', any: '通用' }[t] || t
+}
+function routingColor(t: string) {
+  return { text_only: 'blue', multimodal: 'purple', any: 'default' }[t] || 'default'
+}
 
 async function fetchConfigs() {
   loading.value = true
@@ -131,6 +151,7 @@ function openEdit(record: ConfigRecord) {
   form.max_tokens = record.max_tokens
   form.is_primary = record.is_primary
   form.is_fallback = record.is_fallback
+  form.routing_type = record.routing_type || 'any'
   form.fallback_result = record.fallback_result
   modalVisible.value = true
 }
@@ -144,6 +165,7 @@ async function handleSave() {
       max_tokens: form.max_tokens,
       is_primary: form.is_primary,
       is_fallback: form.is_fallback,
+      routing_type: form.routing_type,
       fallback_result: form.fallback_result,
     })
     message.success('模型配置已更新')

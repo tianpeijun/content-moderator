@@ -4,7 +4,9 @@
 
 本系统为商城评论提供自动化内容审核能力，通过动态可配置的审核规则驱动 Amazon Bedrock AI 模型对评论文本和图片进行审核。系统包含两个主要入口：面向业务系统的审核 API（API Key 认证）和面向产品经理的管理后台（Cognito 认证）。
 
-系统日处理量约 2000 条评论，采用 Serverless 架构部署于 AWS，使用 Lambda + API Gateway 提供服务，SQS 处理异步任务，PostgreSQL 统一存储规则、测试记录和审核日志。
+系统日处理量约 2000 条评论，采用 Serverless 架构部署于 AWS，使用 Lambda + **HTTP API Gateway v2** 提供服务，SQS 处理异步任务，PostgreSQL 统一存储规则、测试记录和审核日志。
+
+> **网关选型**：采用 HTTP API Gateway v2 而非 REST API Gateway，实测可降低约 50% 的网关层延迟（787ms → 395ms），在预审命中场景下可达成 P50 ≤ 500ms 的响应目标（见测试报告附录 C）。
 
 ### 关键设计决策
 
@@ -13,7 +15,7 @@
 | 前端框架 | Vue 3 + Ant Design Vue | 用户指定，组件库成熟 |
 | 后端框架 | Python FastAPI | 异步支持好，适合 AI 调用场景 |
 | AI 服务 | Amazon Bedrock（多模型） | 支持 Claude/Nova 等模型，按性价比灵活切换 |
-| 部署方式 | Lambda + API Gateway | Serverless，日 2000 条无需常驻服务 |
+| 部署方式 | Lambda + HTTP API Gateway v2 | Serverless + 低延迟网关，日 2000 条无需常驻服务 |
 | 异步队列 | SQS | 批量测试解耦，削峰填谷 |
 | 数据存储 | RDS PostgreSQL | 统一存储规则、测试记录和审核日志，简化架构 |
 | 前端部署 | S3 + CloudFront | 静态资源 CDN 分发 |
@@ -32,7 +34,7 @@ graph TB
 
     subgraph AWS Cloud
         subgraph API 层
-            APIGW[API Gateway]
+            APIGW[HTTP API Gateway v2]
             CF[CloudFront]
             S3Static[S3<br/>静态资源]
         end
@@ -94,27 +96,44 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant Client as 业务系统
-    participant APIGW as API Gateway
+    participant APIGW as HTTP API Gateway v2
+    participant Auth as Lambda Authorizer
     participant Lambda as 审核 Lambda
     participant RDS as PostgreSQL
     participant Bedrock as Amazon Bedrock
 
-    Client->>APIGW: POST /api/v1/moderate (API Key)
+    Client->>APIGW: POST /api/v1/moderate (X-API-Key)
+    APIGW->>Auth: 校验 X-API-Key（5 min 缓存）
+    Auth-->>APIGW: 允许 / 拒绝
     APIGW->>Lambda: 转发请求
-    Lambda->>RDS: 加载启用规则
-    RDS-->>Lambda: 返回规则集合
-    Lambda->>Lambda: 组装最终提示词
-    Lambda->>Bedrock: 调用 AI 模型
-    alt 主模型成功
-        Bedrock-->>Lambda: 返回审核结果
-    else 主模型失败
-        Lambda->>Bedrock: 调用备用模型
-        Bedrock-->>Lambda: 返回降级结果
+    Lambda->>Lambda: 预审过滤（关键词/正则）
+    alt 预审命中
+        Lambda->>RDS: 写入审核日志（pre_filter=true）
+        Lambda-->>APIGW: 返回审核结果（<50ms）
+    else 预审未命中
+        Lambda->>RDS: 加载启用规则
+        RDS-->>Lambda: 返回规则集合
+        Lambda->>Lambda: 组装最终提示词
+        alt 包含 image_url
+            Lambda->>Lambda: 获取图片字节流
+        end
+        Lambda->>Bedrock: 调用主模型（纯文本走 Qwen3，图文走 Sonnet 4）
+        alt 主模型成功
+            Bedrock-->>Lambda: 返回审核结果
+        else 主模型失败
+            Lambda->>Bedrock: 调用备用模型（Haiku 4.5）
+            Bedrock-->>Lambda: 返回审核结果
+        end
+        Lambda->>RDS: 写入审核日志
     end
-    Lambda->>RDS: 写入审核日志
     Lambda-->>APIGW: 返回审核结果
     APIGW-->>Client: JSON 响应
 ```
+
+**性能目标（需求 18）**：
+- 预审命中：P50 ≤ 400ms, P95 ≤ 500ms
+- 模型路径（Qwen3）：P50 ≤ 1000ms, P95 ≤ 1500ms
+- 混合流量（预审命中率 ≥ 60%）：整体 P50 ≤ 500ms
 
 
 ## 组件与接口
@@ -127,8 +146,8 @@ sequenceDiagram
 
 | 方法 | 路径 | 认证 | 描述 |
 |------|------|------|------|
-| POST | /api/v1/moderate | API Key | 提交内容审核 |
-| GET | /api/v1/moderate/{taskId} | API Key | 查询审核结果 |
+| POST | /api/v1/moderate | X-API-Key（Lambda Authorizer） | 提交内容审核 |
+| GET | /api/v1/moderate/{taskId} | X-API-Key（Lambda Authorizer） | 查询审核结果 |
 
 #### 请求/响应格式
 

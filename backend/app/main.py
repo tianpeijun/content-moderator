@@ -33,6 +33,23 @@ try:
     Base.metadata.create_all(bind=engine)
     _logger.info("Database tables ensured")
 
+    # Add new columns to existing tables (create_all doesn't alter existing tables)
+    from sqlalchemy import text as sa_text
+    _conn = engine.connect()
+    try:
+        # routing_type on model_config
+        _conn.execute(sa_text("ALTER TABLE model_config ADD COLUMN IF NOT EXISTS routing_type VARCHAR(20) DEFAULT 'any' NOT NULL"))
+        # text_label, image_label, language on moderation_logs
+        _conn.execute(sa_text("ALTER TABLE moderation_logs ADD COLUMN IF NOT EXISTS text_label VARCHAR(50)"))
+        _conn.execute(sa_text("ALTER TABLE moderation_logs ADD COLUMN IF NOT EXISTS image_label VARCHAR(50)"))
+        _conn.execute(sa_text("ALTER TABLE moderation_logs ADD COLUMN IF NOT EXISTS language VARCHAR(10)"))
+        _conn.commit()
+        _logger.info("Schema migrations applied")
+    except Exception as _mig_exc:
+        _logger.warning("Schema migration skipped: %s", _mig_exc)
+    finally:
+        _conn.close()
+
     # Seed default model configs if table is empty
     _db = SessionLocal()
     try:
@@ -73,6 +90,38 @@ try:
             ])
             _db.commit()
             _logger.info("Seeded default model configs")
+
+        # Add new models if they don't exist yet
+        _existing_model_ids = {c.model_id for c in _db.query(ModelConfig).all()}
+        _new_models = []
+        if "qwen.qwen3-32b-v1:0" not in _existing_model_ids:
+            _new_models.append(ModelConfig(
+                model_id="qwen.qwen3-32b-v1:0",
+                model_name="Qwen3 32B",
+                temperature=0.0,
+                max_tokens=4096,
+                is_primary=False,
+                is_fallback=False,
+                routing_type="text_only",
+                cost_per_1k_input=0.00035,
+                cost_per_1k_output=0.0015,
+            ))
+        if "amazon.nova-2-lite-v1:0" not in _existing_model_ids:
+            _new_models.append(ModelConfig(
+                model_id="amazon.nova-2-lite-v1:0",
+                model_name="Nova 2 Lite",
+                temperature=0.0,
+                max_tokens=4096,
+                is_primary=False,
+                is_fallback=False,
+                routing_type="text_only",
+                cost_per_1k_input=0.00004,
+                cost_per_1k_output=0.00016,
+            ))
+        if _new_models:
+            _db.add_all(_new_models)
+            _db.commit()
+            _logger.info("Added %d new model configs", len(_new_models))
     finally:
         _db.close()
 

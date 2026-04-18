@@ -66,7 +66,7 @@ class TestHttpFetch:
         with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
             mock_response = MagicMock()
             mock_response.content = b"http-image-bytes"
-            mock_response.raise_for_status = MagicMock()
+            mock_response.status_code = 200
 
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
@@ -82,7 +82,7 @@ class TestHttpFetch:
         with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
             mock_response = MagicMock()
             mock_response.content = b"https-image-bytes"
-            mock_response.raise_for_status = MagicMock()
+            mock_response.status_code = 200
 
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
@@ -114,3 +114,100 @@ class TestInvalidScheme:
     async def test_data_uri_raises_value_error(self, fetcher):
         with pytest.raises(ValueError, match="Unsupported image URL scheme"):
             await fetcher.fetch("data:image/png;base64,abc")
+
+
+# ---------------------------------------------------------------------------
+# Error mapping: 4xx → client error, 5xx/timeout → server error
+# ---------------------------------------------------------------------------
+
+class TestErrorMapping:
+    """Verify that HTTP/network failures are mapped to the correct exception
+    subclass so the API layer can choose 400 vs 502 / 500 appropriately."""
+
+    async def test_http_404_raises_client_error(self, fetcher):
+        from backend.app.services.image_fetcher import ImageFetchClientError
+
+        with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
+            mock_response = MagicMock()
+            mock_response.status_code = 404
+
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            with pytest.raises(ImageFetchClientError, match="HTTP 404"):
+                await fetcher.fetch("https://example.com/missing.jpg")
+
+    async def test_http_429_raises_client_error(self, fetcher):
+        """429 (rate-limited) is a client-side category (bad request from caller)."""
+        from backend.app.services.image_fetcher import ImageFetchClientError
+
+        with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            with pytest.raises(ImageFetchClientError, match="HTTP 429"):
+                await fetcher.fetch("https://example.com/limited.jpg")
+
+    async def test_http_500_raises_server_error(self, fetcher):
+        from backend.app.services.image_fetcher import ImageFetchServerError
+
+        with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
+            mock_response = MagicMock()
+            mock_response.status_code = 503
+
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            with pytest.raises(ImageFetchServerError, match="HTTP 503"):
+                await fetcher.fetch("https://example.com/down.jpg")
+
+    async def test_http_timeout_raises_server_error(self, fetcher):
+        import httpx
+        from backend.app.services.image_fetcher import ImageFetchServerError
+
+        with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = httpx.TimeoutException("timed out")
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            with pytest.raises(ImageFetchServerError, match="timed out"):
+                await fetcher.fetch("https://example.com/slow.jpg")
+
+    async def test_http_connection_error_raises_server_error(self, fetcher):
+        import httpx
+        from backend.app.services.image_fetcher import ImageFetchServerError
+
+        with patch("backend.app.services.image_fetcher.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = httpx.ConnectError("connection refused")
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            with pytest.raises(ImageFetchServerError, match="network error"):
+                await fetcher.fetch("https://example.com/unreachable.jpg")
+
+    async def test_s3_missing_key_raises_client_error(self, fetcher, mock_s3_client):
+        from botocore.exceptions import ClientError
+        from backend.app.services.image_fetcher import ImageFetchClientError
+
+        mock_s3_client.get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "The key does not exist"}},
+            "GetObject",
+        )
+        with pytest.raises(ImageFetchClientError, match="not found"):
+            await fetcher.fetch("s3://bucket/missing.jpg")

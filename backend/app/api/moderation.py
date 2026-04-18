@@ -21,8 +21,13 @@ from backend.app.schemas.moderation import (
     ModerationRequest,
     ModerationResponse,
 )
-from backend.app.services.image_fetcher import ImageFetcher
+from backend.app.services.image_fetcher import (
+    ImageFetcher,
+    ImageFetchClientError,
+    ImageFetchServerError,
+)
 from backend.app.services.model_invoker import ModelInvoker, ModelSettings
+from backend.app.services.pre_filter import PreFilterEngine
 from backend.app.services.rule_engine import ModerationContent, RuleEngine
 
 logger = logging.getLogger(__name__)
@@ -33,13 +38,46 @@ router = APIRouter(prefix="/api/v1")
 _rule_engine = RuleEngine()
 _image_fetcher = ImageFetcher()
 _model_invoker = ModelInvoker()
+_pre_filter = PreFilterEngine()
+
+# Shared service instances
+_rule_engine = RuleEngine()
+_image_fetcher = ImageFetcher()
+_model_invoker = ModelInvoker()
 
 
-def _build_model_settings(db: Session) -> ModelSettings:
-    """Load primary and fallback model config from DB and return a ModelSettings."""
+def _build_model_settings(db: Session, has_image: bool = False) -> ModelSettings:
+    """Load model config with smart routing based on content type.
+
+    - Pure text (has_image=False): prefer routing_type='text_only' primary model
+    - Multimodal (has_image=True): prefer routing_type='multimodal' primary model
+    - Fallback: routing_type='any' or any primary model
+    """
+    # Determine preferred routing type
+    preferred_type = "multimodal" if has_image else "text_only"
+
+    # Try to find a primary model matching the preferred routing type
     primary = db.execute(
-        select(ModelConfig).where(ModelConfig.is_primary.is_(True))
+        select(ModelConfig).where(
+            ModelConfig.is_primary.is_(True),
+            ModelConfig.routing_type == preferred_type,
+        )
     ).scalar_one_or_none()
+
+    # Fallback to routing_type='any' primary
+    if primary is None:
+        primary = db.execute(
+            select(ModelConfig).where(
+                ModelConfig.is_primary.is_(True),
+                ModelConfig.routing_type == "any",
+            )
+        ).scalar_one_or_none()
+
+    # Fallback to any primary model
+    if primary is None:
+        primary = db.execute(
+            select(ModelConfig).where(ModelConfig.is_primary.is_(True))
+        ).scalar_one_or_none()
 
     if primary is None:
         raise HTTPException(
@@ -48,7 +86,9 @@ def _build_model_settings(db: Session) -> ModelSettings:
         )
 
     fallback = db.execute(
-        select(ModelConfig).where(ModelConfig.is_fallback.is_(True))
+        select(ModelConfig).where(
+            ModelConfig.is_fallback.is_(True),
+        ).limit(1)
     ).scalar_one_or_none()
 
     return ModelSettings(
@@ -83,6 +123,43 @@ async def moderate_content(
     task_id = str(uuid.uuid4())
 
     try:
+        has_image = bool(request.image_url and request.image_url.strip())
+
+        # 0. Pre-filter: fast keyword/regex scan for pure text (no image)
+        if not has_image:
+            pf = _pre_filter.scan(request.text)
+            if pf.matched:
+                elapsed_ms = int((time.monotonic() - start_ts) * 1000)
+                # Persist log with pre_filter flag
+                log = ModerationLog(
+                    task_id=task_id,
+                    status="completed",
+                    input_text=request.text,
+                    business_type=request.business_type,
+                    result="reject" if pf.action == "reject" else "flag",
+                    text_label=pf.text_label,
+                    image_label="none",
+                    confidence=pf.confidence,
+                    matched_rules=[{"rule_id": "pre_filter", "rule_name": pf.rule_name, "action": pf.action}],
+                    processing_time_ms=elapsed_ms,
+                    degraded=False,
+                    model_id="pre_filter",
+                )
+                db.add(log)
+                db.commit()
+
+                return ModerationResponse(
+                    task_id=task_id,
+                    status="completed",
+                    result="reject" if pf.action == "reject" else "flag",
+                    text_label=pf.text_label,
+                    image_label="none",
+                    confidence=pf.confidence,
+                    matched_rules=[MatchedRule(rule_id="pre_filter", rule_name=pf.rule_name, action=pf.action)],
+                    degraded=False,
+                    processing_time_ms=elapsed_ms,
+                )
+
         # 1. Load active rules
         rules = _rule_engine.get_active_rules(db, request.business_type)
 
@@ -96,11 +173,26 @@ async def moderate_content(
         # 4. Fetch image bytes if image_url provided
         images: list[bytes] | None = None
         if request.image_url and request.image_url.strip():
-            image_bytes = await _image_fetcher.fetch(request.image_url.strip())
+            try:
+                image_bytes = await _image_fetcher.fetch(request.image_url.strip())
+            except ImageFetchClientError as exc:
+                # Bad URL, 4xx from image source, unsupported scheme → 400
+                logger.info("Image fetch client error for task %s: %s", task_id, exc)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid image_url: {exc}",
+                )
+            except ImageFetchServerError as exc:
+                # Timeout, network error, 5xx → 502 (bad upstream)
+                logger.warning("Image fetch server error for task %s: %s", task_id, exc)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Unable to fetch image: {exc}",
+                )
             images = [image_bytes]
 
-        # 5. Build model settings from DB config
-        settings = _build_model_settings(db)
+        # 5. Build model settings from DB config (smart routing)
+        settings = _build_model_settings(db, has_image=has_image)
 
         # 6. Invoke model with fallback
         model_resp = await _model_invoker.invoke_with_fallback(prompt, images, settings)

@@ -34,7 +34,7 @@ class ModelResponse:
 
     result: str  # pass / reject / review / flag
     text_label: str = "safe"  # safe/spam/toxic/hate_speech/privacy_leak/political/self_harm/illegal_trade/misleading
-    image_label: str = "无"  # 无/pornography/gambling/drugs/violence/terrorism/qr_code_spam/contact_info/ad_overlay/minor_exploitation
+    image_label: str = "none"  # none/pornography/gambling/drugs/violence/terrorism/qr_code_spam/contact_info/ad_overlay/minor_exploitation
     confidence: float = 0.0
     matched_rules: list[dict] = field(default_factory=list)
     raw_response: str = ""
@@ -118,16 +118,35 @@ class ModelInvoker:
         raw_text = self._extract_text(response)
         parsed = self._parse_response(raw_text)
 
+        # Type-safe extraction with coercion (different models return different types)
+        result_val = str(parsed.get("result", "review"))
+        text_label_val = str(parsed.get("text_label", "safe"))
+        image_label_val = str(parsed.get("image_label", "none"))
+        # Normalize: Chinese "无" from older prompts → canonical "none"
+        if image_label_val == "无":
+            image_label_val = "none"
+        language_val = str(parsed.get("language", "")) if parsed.get("language") else ""
+
+        try:
+            confidence_val = float(parsed.get("confidence", 0.0))
+            confidence_val = max(0.0, min(1.0, confidence_val))
+        except (TypeError, ValueError):
+            confidence_val = 0.0
+
+        matched_rules_val = parsed.get("matched_rules", [])
+        if not isinstance(matched_rules_val, list):
+            matched_rules_val = []
+
         return ModelResponse(
-            result=parsed.get("result", "review"),
-            text_label=parsed.get("text_label", "safe"),
-            image_label=parsed.get("image_label", "无"),
-            confidence=float(parsed.get("confidence", 0.0)),
-            matched_rules=parsed.get("matched_rules", []),
+            result=result_val,
+            text_label=text_label_val,
+            image_label=image_label_val,
+            confidence=confidence_val,
+            matched_rules=matched_rules_val,
             raw_response=raw_text,
             degraded=False,
             model_id=model_id,
-            language=parsed.get("language", ""),
+            language=language_val,
         )
 
     async def invoke_with_fallback(
